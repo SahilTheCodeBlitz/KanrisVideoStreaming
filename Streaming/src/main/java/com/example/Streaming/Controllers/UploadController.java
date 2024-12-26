@@ -58,7 +58,7 @@ public class UploadController {
     @RequestMapping("/fetch/{videoId}/master.m3u8")
     public ResponseEntity<?> fetch(@PathVariable("videoId") String videoId ){
 
-        return videoService.fetchVideo(videoId);
+        return videoService.fetchVideoS3(videoId);
 
     }
 
@@ -67,7 +67,7 @@ public class UploadController {
     @RequestMapping("/fetch/{videoId}/{segment}.ts")
     public ResponseEntity<Resource> serveSegments(@PathVariable String videoId , @PathVariable String segment){
 
-        return videoService.fetchSegment(videoId,segment);
+        return videoService.fetchSegmentS3(videoId,segment);
 
     }
 

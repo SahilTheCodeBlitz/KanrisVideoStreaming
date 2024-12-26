@@ -1,7 +1,13 @@
 package com.example.Streaming.Services.implementation;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.S3Object;
 import com.example.Streaming.Model.Video;
 import com.example.Streaming.Services.VideoUploadInterface;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -15,6 +21,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Objects;
 
 
 @Service
@@ -23,6 +30,12 @@ public class VideoService implements VideoUploadInterface {
     private static final String Temp_Storage_Directory = "videos\\temp\\";
 
     private static final String TEMP_HSL = "videosHsl\\";
+
+    @Autowired
+    private AmazonS3 amazonS3;
+
+    @Value("${aws.s3.bucket.name}")
+    private String bucketName;
 
 
     @Override
@@ -63,6 +76,13 @@ public class VideoService implements VideoUploadInterface {
             // Process the video using FFmpeg
             // second argument is the file path where the video is stored
             processVideo(video.getVideoId(),video.getFilePath());
+
+
+
+            // deleting the temporary files
+
+            // Clean up temporary files
+            cleanupTemporaryFiles(video.getVideoId(), video.getFilePath().toString());
 
 
 
@@ -117,6 +137,12 @@ public class VideoService implements VideoUploadInterface {
                 System.out.println(line);  // Log output to console
             }
 
+
+            // uploading the videoHsl folder to the aws s3
+
+            // Upload processed files to S3
+            File outputDirectory = outputDir.toFile();
+            uploadDirectoryToS3(outputDirectory, "hls/" + videoId);
 
 
 
@@ -180,4 +206,130 @@ public class VideoService implements VideoUploadInterface {
         return ResponseEntity.ok().header(HttpHeaders.CONTENT_TYPE,"video/mp2t").body(resource);
 
     }
+
+
+    public void uploadDirectoryToS3(File directory, String s3Path) {
+        if (!directory.exists() || !directory.isDirectory()) {
+            throw new IllegalArgumentException("The provided directory is invalid.");
+        }
+
+        try {
+            // Iterate through files in the directory
+            for (File file : Objects.requireNonNull(directory.listFiles())) {
+                if (file.isFile()) {
+                    // Define the S3 key (path within the bucket)
+                    String key = s3Path + "/" + file.getName();
+
+                    System.out.println("Uploading: " + file.getAbsolutePath() + " to S3 key: " + key);
+
+                    // Upload the file
+                    amazonS3.putObject(bucketName, key, new FileInputStream(file), new ObjectMetadata());
+                } else if (file.isDirectory()) {
+                    // Handle subdirectories recursively
+                    uploadDirectoryToS3(file, s3Path + "/" + file.getName());
+                }
+            }
+            System.out.println("Directory uploaded successfully to S3.");
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to upload directory to S3", e);
+        }
+    }
+
+
+
+    // two function for sending master file and the segment file from s3 bucket to frontend
+
+
+    // method for sending the master file
+    public ResponseEntity<?> fetchVideoS3(String videoId) {
+        try {
+            // S3 key for the master.m3u8 file
+            String key = "hls/" + videoId + "/master.m3u8";
+
+
+            // Check if the file exists in S3
+            if (!amazonS3.doesObjectExist(bucketName, key)) {
+                return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+            }
+
+            // Get the file as a S3Object
+            S3Object s3Object = amazonS3.getObject(bucketName, key);
+
+            // Stream the file content
+            InputStream inputStream = s3Object.getObjectContent();
+            byte[] content = inputStream.readAllBytes();
+
+            // Return the content with appropriate headers
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                    .header(HttpHeaders.CACHE_CONTROL, "no-cache, no-store")
+                    .body(content);
+
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("An error occurred while fetching the video: " + e.getMessage());
+        }
+    }
+
+
+    // function for sending the segments from s3 to the client
+
+    public ResponseEntity<Resource> fetchSegmentS3(String videoId, String segment) {
+        try {
+            // S3 key for the specific segment file
+            String key = "hls/" + videoId + "/" + segment + ".ts";
+
+
+            // Check if the file exists in S3
+            if (!amazonS3.doesObjectExist(bucketName, key)) {
+                return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+            }
+
+            // Get the file as a S3Object
+            S3Object s3Object = amazonS3.getObject(bucketName, key);
+
+            // Stream the file content as a resource
+            InputStream inputStream = s3Object.getObjectContent();
+            Resource resource = new InputStreamResource(inputStream);
+
+            // Return the resource with appropriate headers
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "video/mp2t")
+                    .body(resource);
+
+        } catch (Exception e) {
+            return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+
+    // function for deleting the temporary data from storage
+
+    private void cleanupTemporaryFiles(String videoId, String videoFilePath) {
+        try {
+            // Delete the video file
+            File videoFile = new File(videoFilePath);
+            if (videoFile.exists() && videoFile.isFile()) {
+                videoFile.delete();
+                System.out.println("Deleted video file: " + videoFilePath);
+            }
+
+            // Delete the HLS output directory
+            Path hlsOutputDir = Paths.get(TEMP_HSL, videoId);
+            if (Files.exists(hlsOutputDir)) {
+                Files.walk(hlsOutputDir)
+                        .map(Path::toFile)
+                        .sorted((a, b) -> b.compareTo(a)) // Ensure files are deleted before directories
+                        .forEach(File::delete);
+                System.out.println("Deleted HLS directory: " + hlsOutputDir);
+            }
+        } catch (IOException e) {
+            System.err.println("Error during cleanup: " + e.getMessage());
+        }
+    }
+
+
+
+
 }
